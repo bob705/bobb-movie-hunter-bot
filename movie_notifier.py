@@ -210,23 +210,49 @@ def format_countries(details, fallback_origin=None):
     return ", ".join(names) if names else None
 
 
+TELEGRAM_CAPTION_LIMIT = 1024  # limit Telegram buat caption foto (sendPhoto)
+TELEGRAM_MESSAGE_LIMIT = 4096  # limit Telegram buat pesan teks biasa (sendMessage)
+
+
+def truncate_text(text, limit):
+    """Potong teks kalau kepanjangan, kasih tanda '...' di akhir biar jelas terpotong.
+    Aman buat HTML simple (<b>) karena kita motong di akhir string (sinopsis),
+    bukan di tengah tag."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 def send_telegram(text, poster_path=None):
     if poster_path:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "photo": f"https://image.tmdb.org/t/p/w500{poster_path}",
-            "caption": text,
+            "caption": truncate_text(text, TELEGRAM_CAPTION_LIMIT),
             "parse_mode": "HTML",
         }
     else:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
+            "text": truncate_text(text, TELEGRAM_MESSAGE_LIMIT),
             "parse_mode": "HTML",
         }
     r = requests.post(url, data=payload, timeout=15)
+    if not r.ok:
+        # Kalau masih gagal (misal poster_path invalid), fallback kirim teks doang
+        # tanpa foto biar notifikasi tetap kekirim daripada hilang sama sekali.
+        if poster_path:
+            fallback_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            fallback_payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": truncate_text(text, TELEGRAM_MESSAGE_LIMIT),
+                "parse_mode": "HTML",
+            }
+            r2 = requests.post(fallback_url, data=fallback_payload, timeout=15)
+            r2.raise_for_status()
+            return
     r.raise_for_status()
 
 

@@ -215,9 +215,7 @@ TELEGRAM_MESSAGE_LIMIT = 4096  # limit Telegram buat pesan teks biasa (sendMessa
 
 
 def truncate_text(text, limit):
-    """Potong teks kalau kepanjangan, kasih tanda '...' di akhir biar jelas terpotong.
-    Aman buat HTML simple (<b>) karena kita motong di akhir string (sinopsis),
-    bukan di tengah tag."""
+    """Potong teks kalau kepanjangan, kasih tanda '...' di akhir biar jelas terpotong."""
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
@@ -241,8 +239,6 @@ def send_telegram(text, poster_path=None):
         }
     r = requests.post(url, data=payload, timeout=15)
     if not r.ok:
-        # Kalau masih gagal (misal poster_path invalid), fallback kirim teks doang
-        # tanpa foto biar notifikasi tetap kekirim daripada hilang sama sekali.
         if poster_path:
             fallback_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             fallback_payload = {
@@ -292,7 +288,7 @@ def process_movies(items, state_key, state, category_label):
         details = get_movie_details(movie_id)
         countries = [c["iso_3166_1"] for c in details.get("production_countries", [])]
         if movie.get("original_language") == "id" or "ID" in countries:
-            seen.append(movie_id)  # mark seen biar gak dicek ulang tiap jam
+            seen.append(movie_id)
             continue
         release_data = get_movie_release_dates(movie_id)
         certification = find_movie_certification(release_data, REGION)

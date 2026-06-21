@@ -34,6 +34,21 @@ STATE_DEFAULTS = {
     "tv_on_the_air": [], "tv_upcoming": [],
 }
 
+# Nama negara biar gak cuma kode ISO (ID, US, dst) yang tampil di pesan
+COUNTRY_NAMES = {
+    "US": "Amerika Serikat", "GB": "Inggris", "JP": "Jepang", "KR": "Korea Selatan",
+    "FR": "Prancis", "DE": "Jerman", "ES": "Spanyol", "IT": "Italia",
+    "CN": "China", "HK": "Hong Kong", "TW": "Taiwan", "TH": "Thailand",
+    "IN": "India", "CA": "Kanada", "AU": "Australia", "MX": "Meksiko",
+    "BR": "Brasil", "RU": "Rusia", "TR": "Turki", "NL": "Belanda",
+    "SE": "Swedia", "DK": "Denmark", "NO": "Norwegia", "PH": "Filipina",
+    "MY": "Malaysia", "SG": "Singapura", "NZ": "Selandia Baru", "IE": "Irlandia",
+    "BE": "Belgia", "PL": "Polandia", "AT": "Austria", "CH": "Swiss",
+    "IL": "Israel", "AE": "Uni Emirat Arab", "EG": "Mesir", "ZA": "Afrika Selatan",
+    "AR": "Argentina", "CO": "Kolombia", "CL": "Chili", "VN": "Vietnam",
+    "ID": "Indonesia",
+}
+
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -50,10 +65,10 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-def tmdb_get(path, params=None):
-    params = params or {}
+def tmdb_get(path, params=None, language="id-ID"):
+    params = dict(params or {})
     params["api_key"] = TMDB_API_KEY
-    params["language"] = "id-ID"
+    params["language"] = language
     r = requests.get(f"{TMDB_BASE}{path}", params=params, timeout=15)
     r.raise_for_status()
     return r.json()
@@ -74,6 +89,19 @@ def fetch_all_pages(path, params=None, max_pages=10):
             break
         page += 1
     return results
+
+
+def get_overview_with_fallback(details, path):
+    """Kalau overview bahasa Indonesia kosong, request ulang pakai en-US.
+    `path` contoh: "/movie/123" atau "/tv/456"."""
+    overview = (details.get("overview") or "").strip()
+    if overview:
+        return overview
+    try:
+        en_details = tmdb_get(path, language="en-US")
+        return (en_details.get("overview") or "").strip() or None
+    except requests.RequestException:
+        return None
 
 
 # ---------- Movie ----------
@@ -164,6 +192,24 @@ def find_tv_certification(ratings_data, region):
     return None
 
 
+def format_genres(details):
+    """Ambil list genre dari response detail (movie atau tv), gabung jadi string."""
+    genres = details.get("genres") or []
+    names = [g["name"] for g in genres if g.get("name")]
+    return ", ".join(names) if names else None
+
+
+def format_countries(details, fallback_origin=None):
+    """Ambil negara produksi dari response detail. Fallback ke origin_country
+    (dipakai TV show) kalau production_countries kosong."""
+    countries = details.get("production_countries") or []
+    codes = [c["iso_3166_1"] for c in countries if c.get("iso_3166_1")]
+    if not codes and fallback_origin:
+        codes = list(fallback_origin)
+    names = [COUNTRY_NAMES.get(code, code) for code in codes]
+    return ", ".join(names) if names else None
+
+
 def send_telegram(text, poster_path=None):
     if poster_path:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
@@ -184,14 +230,17 @@ def send_telegram(text, poster_path=None):
     r.raise_for_status()
 
 
-def format_message(item, category_label, certification=None, media_type="movie"):
+def format_message(item, category_label, certification=None, media_type="movie",
+                    genres=None, countries=None, synopsis_override=None):
     title = item.get("title") or item.get("name") or "Unknown"
     date_field = item.get("release_date") or item.get("first_air_date") or ""
     year = date_field[:4] if date_field else "----"
     rating = item.get("vote_average") or 0
     vote_count = item.get("vote_count") or 0
-    synopsis = item.get("overview") or "Sinopsis belum tersedia."
+    synopsis = synopsis_override or item.get("overview") or "Sinopsis belum tersedia."
     cert_line = f"🔖 Rating Usia: {certification}\n" if certification else ""
+    genre_line = f"🎭 Genre: {genres}\n" if genres else ""
+    country_line = f"🌍 Negara: {countries}\n" if countries else ""
     tipe_icon = "🎬" if media_type == "movie" else "📺"
 
     return (
@@ -199,6 +248,8 @@ def format_message(item, category_label, certification=None, media_type="movie")
         f"<b>{title}</b> ({year})\n"
         f"⭐ {rating:.1f}/10 ({vote_count:,} votes)\n"
         f"{cert_line}"
+        f"{genre_line}"
+        f"{country_line}"
         f"📅 Rilis: {date_field or '-'}\n\n"
         f"📖 {synopsis}"
     )
@@ -212,13 +263,20 @@ def process_movies(items, state_key, state, category_label):
         movie_id = movie["id"]
         if movie_id in seen:
             continue
-        if is_indonesian_movie(movie):
+        details = get_movie_details(movie_id)
+        countries = [c["iso_3166_1"] for c in details.get("production_countries", [])]
+        if movie.get("original_language") == "id" or "ID" in countries:
             seen.append(movie_id)  # mark seen biar gak dicek ulang tiap jam
             continue
         release_data = get_movie_release_dates(movie_id)
         certification = find_movie_certification(release_data, REGION)
+        genres = format_genres(details)
+        country_str = format_countries(details)
+        synopsis = get_overview_with_fallback(details, f"/movie/{movie_id}")
         send_telegram(
-            format_message(movie, category_label, certification, "movie"),
+            format_message(movie, category_label, certification, "movie",
+                            genres=genres, countries=country_str,
+                            synopsis_override=synopsis),
             movie.get("poster_path"),
         )
         seen.append(movie_id)
@@ -231,13 +289,23 @@ def process_tv(items, state_key, state, category_label):
         tv_id = show["id"]
         if tv_id in seen:
             continue
-        if is_indonesian_tv(show):
+        if show.get("original_language") == "id" or "ID" in (show.get("origin_country") or []):
+            seen.append(tv_id)
+            continue
+        details = get_tv_details(tv_id)
+        countries = [c["iso_3166_1"] for c in details.get("production_countries", [])]
+        if "ID" in countries:
             seen.append(tv_id)
             continue
         ratings_data = get_tv_content_ratings(tv_id)
         certification = find_tv_certification(ratings_data, REGION)
+        genres = format_genres(details)
+        country_str = format_countries(details, fallback_origin=show.get("origin_country"))
+        synopsis = get_overview_with_fallback(details, f"/tv/{tv_id}")
         send_telegram(
-            format_message(show, category_label, certification, "tv"),
+            format_message(show, category_label, certification, "tv",
+                            genres=genres, countries=country_str,
+                            synopsis_override=synopsis),
             show.get("poster_path"),
         )
         seen.append(tv_id)
@@ -253,8 +321,12 @@ def process_movie_format_releases(candidates, state):
         if is_indonesian_movie(movie):
             continue
 
+        details = get_movie_details(movie_id)
         release_data = get_movie_release_dates(movie_id)
         certification = find_movie_certification(release_data, REGION)
+        genres = format_genres(details)
+        country_str = format_countries(details)
+        synopsis = get_overview_with_fallback(details, f"/movie/{movie_id}")
 
         digital_date = find_release_date(release_data, REGION, TYPE_DIGITAL) or \
             find_release_date(release_data, "US", TYPE_DIGITAL)
@@ -265,7 +337,9 @@ def process_movie_format_releases(candidates, state):
             d = datetime.strptime(digital_date, "%Y-%m-%d").date()
             if d <= today:
                 send_telegram(
-                    format_message(movie, "Sudah Rilis Digital", certification, "movie"),
+                    format_message(movie, "Sudah Rilis Digital", certification, "movie",
+                                    genres=genres, countries=country_str,
+                                    synopsis_override=synopsis),
                     movie.get("poster_path"),
                 )
                 state["movie_digital"].append(movie_id)
@@ -274,7 +348,9 @@ def process_movie_format_releases(candidates, state):
             d = datetime.strptime(physical_date, "%Y-%m-%d").date()
             if d <= today:
                 send_telegram(
-                    format_message(movie, "Sudah Rilis Blu-ray", certification, "movie"),
+                    format_message(movie, "Sudah Rilis Blu-ray", certification, "movie",
+                                    genres=genres, countries=country_str,
+                                    synopsis_override=synopsis),
                     movie.get("poster_path"),
                 )
                 state["movie_physical"].append(movie_id)
